@@ -1,0 +1,485 @@
+// Data Driven Soil Sampling Using Google Earth Engine and ESRI 
+// Oliver Hoffman 
+// 04-02-2024
+
+// STEP 1- ALTERATION OF DYNAMIC VALUES:
+// How many clusters do you want?
+var numClusters = 5; 
+
+// How many sampling points do you want?
+var numPoints = 30;            
+
+// What is the name of the polygon you made?
+var geometry = LeFrance;
+
+// LiDAR data brought in from ArcGIS Pro as a TIF file (accessed via assets)
+var SlopeData = ee.Image('projects/earthengine-legacy/assets/users/oliverhoffmand/lidarslopelefrance').clip(geometry);
+
+// Define date ranges for Sentinel-2 image collection
+var dateRanges = [
+  {start: '2019-05-01', end: '2019-09-25'}, // 2019 growing season
+  {start: '2020-05-01', end: '2020-09-25'}, // 2020 growing season
+  {start: '2021-05-01', end: '2021-09-25'}, // 2021 growing season
+  {start: '2022-05-01', end: '2022-09-25'}, // 2022 growing season
+  {start: '2023-05-01', end: '2023-09-25'}, // 2023 growing season
+];
+//--------------------------------------------------------------------------------------------------
+
+// STEP 2- BRINGING IN REQUESTED DATA:  
+// Load Sentinel-2 image collections for each date range, filter, and merge them. This data is atmospherically corrected and masks for clouds.
+// Function to filter out images with more than 10% cloud cover
+function filterCloudyImages(collection) {
+  return collection.filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 10));
+}
+
+// Create an empty ImageCollection to start with
+var mergedCollection = ee.ImageCollection([]);
+
+// Iterate over each date range to filter and merge the collections
+dateRanges.forEach(function(range) {
+  var collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterDate(range.start, range.end)
+    .filterBounds(geometry);
+
+  // Filter out images with more than 10% cloud cover
+  collection = filterCloudyImages(collection);
+
+  // Merge the current collection with the previously merged collections
+  mergedCollection = mergedCollection.merge(collection);
+});
+
+// Create a composite image using median (better for spatial data with outliers)
+var sentinelComposite = mergedCollection.median().clip(geometry);
+
+// Calculate NDVI and NDWI using the composite image
+var ndvi = sentinelComposite.normalizedDifference(['B8', 'B4']).rename('NDVI');
+var ndwi = sentinelComposite.normalizedDifference(['B3', 'B8']).rename('NDWI');
+
+// POLARIS datasets for organic matter, bulk density, and clay percentage
+var bulkDensity = ee.ImageCollection('projects/sat-io/open-datasets/polaris/bd_mean')
+    .first()
+    .clip(geometry);
+var clayPercentage = ee.ImageCollection('projects/sat-io/open-datasets/polaris/clay_mean')
+    .first()
+    .clip(geometry);
+var organicMatterRaw = ee.ImageCollection('projects/sat-io/open-datasets/polaris/om_mean')
+    .first()
+    .clip(geometry);
+// Altering Organic Matter numbers < 0 to 0
+var organicMatter = organicMatterRaw.max(0);
+var hydraulicCond = ee.ImageCollection('projects/sat-io/open-datasets/polaris/ksat_mean')
+    .first()
+    .clip(geometry);    
+var resMoisture = ee.ImageCollection('projects/sat-io/open-datasets/polaris/theta_r_mean')
+    .first()
+    .clip(geometry);
+//var satMoisture = ee.ImageCollection('projects/sat-io/open-datasets/polaris/theta_s_mean')
+//    .first()
+//    .clip(geometry);
+//-------------------------------------------------------------------------------------------------
+
+// STEP 3- PRIMARY STATISTICS PRE-CLUSTERING FOR REFERENCE:
+// Function to calculate basic statistics for each layer
+function calculateAndPrintStats(image, bandName, scale) {
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.mean()
+      .combine({ reducer2: ee.Reducer.median(), sharedInputs: true })
+      .combine({ reducer2: ee.Reducer.stdDev(), sharedInputs: true })
+      .combine({ reducer2: ee.Reducer.min(), sharedInputs: true })
+      .combine({ reducer2: ee.Reducer.max(), sharedInputs: true }),
+    geometry: geometry,
+    scale: scale,
+    bestEffort: true
+  });
+  
+  print('Statistics for ' + bandName, stats);
+  
+  var histogram = ui.Chart.image.histogram({
+    image: image,
+    region: geometry,
+    scale: scale,
+    minBucketWidth: scale === 0.25 ? 0.002 : 0.01 
+  }).setOptions({
+    title: bandName + ' Histogram',
+    vAxis: {title: 'Count'},
+    hAxis: {title: bandName + ' Value'},
+    series: {0: {color: '00FF00'}}
+  });
+  print(histogram);
+}
+  
+// Datasets categorized by scale
+var datasetsByScale = {
+  '10m': {
+    'NDVI': ndvi,
+    'NDWI': ndwi
+  },
+  '30m': {
+    'OM': organicMatter,
+    'BD': bulkDensity,
+    'Clay %': clayPercentage,
+    'HC': hydraulicCond,
+    //'SM': satMoisture,
+    'RM': resMoisture
+  },
+  '0.5m': {
+    'Slope': SlopeData
+  }
+};
+
+// Loop over each scale category
+Object.keys(datasetsByScale).forEach(function(scale) {
+  var datasets = datasetsByScale[scale];
+  var numericScale = parseFloat(scale);
+  
+  // Calculate statistics and print histogram for each dataset at this scale
+  Object.keys(datasets).forEach(function(bandName) {
+    calculateAndPrintStats(datasets[bandName], bandName, numericScale);
+  });
+});
+//------------------------------------------------------------------------------------------------
+
+// STEP 4- K MEAN CLUSTERING:
+// Resample data to a consistent 10m set
+function resampleToScale(image, scale) {
+  return image.resample('bilinear').reproject({
+    crs: image.projection().crs(),
+    scale: scale
+  });
+}
+
+// Target scale
+var targetScale = 10;
+
+// Define a function to conditionally resample an image only if its scale is not already the target scale
+function checkAndResample(image) {
+  var scale = image.projection().nominalScale();
+  return ee.Image(
+    ee.Algorithms.If(
+    ee.Number(scale).neq(targetScale),
+    resampleToScale(image, targetScale),
+    image
+    )
+  );
+}
+
+// Apply resampling as necessary
+var organicMatter_resampled = checkAndResample(organicMatter);
+var bulkDensity_resampled = checkAndResample(bulkDensity);
+var clayPercentage_resampled = checkAndResample(clayPercentage);
+var hydraulicCond_resampled = checkAndResample(hydraulicCond);
+var resMoisture_resampled = checkAndResample(resMoisture);
+var SlopeData_resampled = checkAndResample(SlopeData);
+
+// Now stack the resampled layers
+var stackedImage = ee.Image.cat([
+  ndvi, 
+  ndwi, 
+  organicMatter_resampled.rename('Organic Matter'), 
+  bulkDensity_resampled.rename('Bulk Density'),
+  clayPercentage_resampled.rename('Clay'),
+  hydraulicCond_resampled.rename('Hydraulic Conductivity'),
+  resMoisture_resampled.rename('Res Soil Moisture'),
+  SlopeData_resampled.rename('Slope'), 
+]).float();
+
+// Perform K Means clustering with a dynamically set number of clusters
+var clusterer = ee.Clusterer.wekaKMeans(numClusters).train({
+    features: stackedImage.sample({
+        region: geometry,
+        scale: 10,
+        numPixels: 5000
+    }),
+    inputProperties: stackedImage.bandNames()
+});
+
+var result = stackedImage.cluster(clusterer);
+//------------------------------------------------------------------------------------------------
+
+// STEP 5- DETERMINE FEATURE IMPORTANCE USING RANDOM FOREST:
+// Label data
+var labeledPixels = stackedImage.addBands(result.select('cluster').rename('label'));
+
+// Sample the labeled pixels to prepare for Random Forest training
+var trainingSample = labeledPixels.sample({
+  region: geometry,
+  scale: 10,
+  numPixels: 5000,
+  seed: 0
+});
+
+// Train Random Forest classifier with the cluster labels
+var classifier = ee.Classifier.smileRandomForest(50) 
+    .train({
+      features: trainingSample,
+      classProperty: 'label',
+      inputProperties: stackedImage.bandNames()
+    });
+
+var featureImportance = ee.Dictionary(classifier.explain().get('importance'));
+
+// Print the feature importance
+featureImportance.evaluate(function(importance) {
+  print('Feature Importance:', importance);
+});
+//------------------------------------------------------------------------------------------------
+
+// STEP 6- PROPORTIONALLY STRATIFIED SAMPLES:
+// Calculate the area of each cluster
+var pixelArea = ee.Image.pixelArea();
+var clusterAreaImage = pixelArea.addBands(result.select('cluster'));
+
+var clusterAreas = clusterAreaImage.reduceRegion({
+  reducer: ee.Reducer.sum().group({
+    groupField: 1,
+    groupName: 'cluster',
+  }),
+  geometry: geometry,
+  scale: 10,
+  maxPixels: 1e9
+});
+
+// Get cluster area sums
+var clusterAreaList = ee.List(clusterAreas.get('groups'));
+
+// Calculate total area
+var totalArea = ee.Number(clusterAreaList.iterate(function(item, prev) {
+  return ee.Number(prev).add(ee.Dictionary(item).get('sum'));
+}, 0));
+
+// Function to create a proportionate stratified sample for one cluster
+function createProportionalSample(clusterDict) {
+  clusterDict = ee.Dictionary(clusterDict);
+  var clusterNum = clusterDict.get('cluster');
+  var clusterArea = ee.Number(clusterDict.get('sum'));
+  var proportion = clusterArea.divide(totalArea);
+  var numPointsForCluster = proportion.multiply(numPoints).toInt();
+  var clusterImage = ee.Image.constant(clusterNum).toInt();
+  var mask = result.select('cluster').eq(clusterImage);
+  var sample = result.updateMask(mask)
+    .stratifiedSample({
+      region: geometry,
+      scale: 10,
+      numPoints: numPointsForCluster,
+      seed: clusterNum, 
+      geometries: true
+    });
+  return sample;
+}
+
+// Apply the function over each cluster
+var proportionalStratifiedSample = ee.FeatureCollection(clusterAreaList.map(createProportionalSample)).flatten();
+//----------------------------------------------------------------------------------------------
+
+// STEP 7- STATS FOR EACH CLUSTER + AREA OF EACH CLUSTER:
+// Error Margin used for area calculation
+var errorMargin = 1;
+
+// With 5 clusters set above, the section below wants 0-5 but there are only 5 clusters so n - 1 = correct number of clusters
+var numClusters1 = numClusters - 1;
+
+// Moves the layer from RASTER to VECTOR polygons using "result" which is the cluster layer 
+var clusterVector = result.reduceToVectors({
+  geometry: geometry,
+  scale: 10,
+  maxPixels: 1e9,
+  geometryType: 'polygon',
+  eightConnected: false,
+  labelProperty: 'cluster'
+});
+
+// Color to assign for each cluster
+function getRandomColor() {
+  var letters = '0123456789ABCDEF';
+  var color = '#';
+  for (var i = 0; i < 6; i++) {
+    color += letters[Math.floor(Math.random() * 16)];
+  }
+  return color;
+}
+
+// Function to calculate basic statistics for organic matter and area for a given geometry
+function calculateStatsForGeometry(image, bandName, targetscale, region) {
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.mean()
+      .combine({ reducer2: ee.Reducer.median(), sharedInputs: true })
+      .combine({ reducer2: ee.Reducer.stdDev(), sharedInputs: true })
+      .combine({ reducer2: ee.Reducer.min(), sharedInputs: true })
+      .combine({ reducer2: ee.Reducer.max(), sharedInputs: true }),
+    geometry: region,
+    scale: targetscale,
+    bestEffort: true
+  });
+  return stats;
+}
+
+// Function to calculate statistics for organic matter and area for each cluster
+function calculateStatsForCluster(clusterIndex) {
+  var clusterPolygons = clusterVector.filter(ee.Filter.eq('cluster', clusterIndex));
+  var clusterGeometry = clusterPolygons.geometry();
+  var clusterAreaAcres = clusterGeometry.area({maxError: errorMargin}).divide(4046.86); 
+
+  var clippedOM = organicMatter_resampled.clip(clusterGeometry);
+  var stats = calculateStatsForGeometry(clippedOM, 'Organic Matter', 10, clusterGeometry);
+
+  clusterAreaAcres.evaluate(function(area) {
+    print('Cluster ' + clusterIndex + ' area: ' + area + ' acres');
+    stats.evaluate(function(result) {
+      print('Statistics for cluster ' + clusterIndex + ': ', result);
+    });
+  });
+}
+
+// Calculate and print statistics and area for each cluster
+for (var i = 0; i <= numClusters1; i++) {
+  calculateStatsForCluster(i);
+}
+
+// Add layers to the map for visualization
+//for (var i = 0; i < numClusters; i++) {
+//  var color = getRandomColor();
+//  Map.addLayer(clusterVector.filter(ee.Filter.eq('cluster', i)), {color: color}, 'Cluster ' + i + ' Polygons');
+//}
+//--------------------------------------------------------------------------------------------------------------------------------------
+
+// STEP 8- CREATING VISUAL MAP:
+// Set base map to satellite as default
+Map.setOptions('SATELLITE');
+
+// Center the map on site and set the zoom level
+Map.centerObject(geometry, 15);
+
+// Define a function to remap the cluster values to specific colors
+function remapClustersToColors(image, numClusters, palette) {
+  var clusterList = ee.List.sequence(0, numClusters - 1);
+  var constantImage = image.remap(clusterList, clusterList, 0);
+  
+  var colored = constantImage.visualize({palette: palette, min: 0, max: numClusters - 1, opacity: 0.75});
+  
+  return colored;
+}
+
+// Custom palette
+var customPalette = [
+  '#a7ba42', 
+  '#95ccba', 
+  '#ffdede', 
+  '#fff0cb', 
+  '#f2cc84'  
+];
+
+// Use visualize clusters
+var coloredClusters = remapClustersToColors(result.select('cluster'), numClusters, customPalette);
+
+// Add the clusters to map
+Map.addLayer(coloredClusters, {}, 'Clusters');
+
+// Add Stratified Sample Points
+Map.addLayer(proportionalStratifiedSample, {color: 'FF0000'}, 'Proportional Stratified Sample Points');
+
+// NDVI layer
+var ndviLayer = ui.Map.Layer(ndvi, {min: 0, max: 0.5, palette: ['ff0000', 'ff8000', 'ffff00', '80ff00', '00ff00']}, 'NDVI', false);
+Map.layers().add(ndviLayer);
+
+// NDWI layer
+var ndwiLayer = ui.Map.Layer(ndwi, {min: -0.5, max: 0, palette: ['8c510a', 'bf812d', 'dfc27d', 'f6e8c3', 'c7eae5', '80cdc1', '35978f', '01665e']}, 'NDWI', false);
+Map.layers().add(ndwiLayer);
+
+// Organic Matter 
+var OMLayer = ui.Map.Layer(organicMatter_resampled, {min: -0.05, max: 0.88, palette: ['#fefee2', '#a6761d']}, 'Organic Matter', false);
+Map.layers().add(OMLayer);
+
+// Bulk Density 
+var BDLayer = ui.Map.Layer(bulkDensity_resampled, {min: 1.1, max: 1.4, palette: ['#f0f0f0', '#636363']}, 'Bulk Density', false);
+Map.layers().add(BDLayer);
+
+// Clay Percentage 
+var CLayer = ui.Map.Layer(clayPercentage_resampled, {min: 10, max: 25, palette: ['#f7f7f7', '#993404']}, 'Clay %', false);
+Map.layers().add(CLayer);
+
+// Slope
+var LDLayer = ui.Map.Layer(SlopeData_resampled, {min: 0, max: 25, palette: ['#ffffcc', '#3e3e3e']}, 'LiDAR Data', false);
+Map.layers().add(LDLayer);
+
+// Hydraulic Conductivity
+var HCLayer = ui.Map.Layer(hydraulicCond_resampled, {min: 0, max: 1, palette: ['#fff7fb', '#023858']}, 'Hydraulic Conductivity', false);
+Map.layers().add(HCLayer);
+
+// Residual Soil Moisture
+var RSLayer = ui.Map.Layer(resMoisture_resampled, {min: 0, max: 0.1, palette: ['#f7fcf5', '#00441b']}, 'Residual Soil Moisture', false);
+Map.layers().add(RSLayer);
+
+// Saturated Soil Moisture with a similar green palette, indicating moisture saturation
+//var SSLayer = ui.Map.Layer(satMoisture, {min: 0, max: 0.1, palette: ['#f7fcf5', '#00441b']}, 'Saturated Soil Moisture', false);
+//Map.layers().add(SSLayer);
+//---------------------------------------------------------------------------------------------------
+
+// STEP 9- EXPORTING ALL LAYERS:
+// Exporting Layers for Movement to ArcGIS Pro
+// Raster Export:
+var exportParams = {
+  scale: 10,              
+  region: geometry,      
+  fileFormat: 'GeoTIFF', 
+  maxPixels: 1e9        
+};
+
+// Function for multiple raster layers (30m)
+function queueExport1(image, description, region) {
+  Export.image.toDrive({
+    image: image,
+    description: description,
+    scale: 30,               
+    region: region,          
+    fileFormat: 'GeoTIFF',   
+    maxPixels: 1e9      
+  });
+}
+
+// Queue up the export task for 30m data
+queueExport1(organicMatter, 'Organic_Matter_export');
+queueExport1(bulkDensity, 'Bulk_Density_export');
+queueExport1(clayPercentage, 'Clay_Percentage_export');
+queueExport1(hydraulicCond, 'Hydraulic_Conductivity_export');
+queueExport1(resMoisture, 'Residual_Soil_Moisture_export');
+//queueExport(satMoisture, 'Saturated_Soil_Moisture_export');
+
+// Function for multiple raster layers (10m)
+function queueExport2(image, description, region) {
+  Export.image.toDrive({
+    image: image,
+    description: description,
+    scale: 10,               
+    region: region,          
+    fileFormat: 'GeoTIFF',   
+    maxPixels: 1e9      
+  });
+}
+
+// Queue up the export task for 10m data
+queueExport2(ndvi, 'NDVI_export');
+queueExport2(ndwi, 'NDWI_export');
+queueExport2(result, 'Clusters_export');
+
+// Function for multiple raster layers (0.5m)
+function queueExport3(image, description, region) {
+  Export.image.toDrive({
+    image: image,
+    description: description,
+    scale: 0.5,               
+    region: region,          
+    fileFormat: 'GeoTIFF',   
+    maxPixels: 1e9      
+  });
+}
+
+// Queue up the export task for 0.5m data
+queueExport3(SlopeData, 'LiDAR_Data_export');
+
+//Vector Export:
+// Export stratified sample points as a SHP
+Export.table.toDrive({
+  collection: proportionalStratifiedSample,
+  description: 'Stratified_Sample_Points',
+  fileFormat: 'SHP' 
+});
