@@ -6,10 +6,10 @@ var numClusters = 5;
 var numPoints = 30;            
 
 // What is the name of the polygon you made?
-var geometry = ________;
+var geometry = LeFrance;
 
 // Slope data brought in from ArcGIS Pro as a TIFF file (accessed via assets)
-var SlopeData = ee.Image('projects/earthengine-legacy/assets/users/yourgmailwithout@gmail.com____/filename_______').clip(geometry);
+var SlopeData = ee.Image('projects/earthengine-legacy/assets/users/oliverhoffmand/lidarslopelefrance').clip(geometry);
 
 // Define date ranges for Sentinel-2 image collection
 var dateRanges = [
@@ -62,7 +62,15 @@ var organicMatterRaw = ee.ImageCollection('projects/sat-io/open-datasets/polaris
     .first()
     .clip(geometry);
 // Altering Organic Matter numbers < 0 to 0
-var organicMatter = organicMatterRaw.max(0);
+//var organicMatter = organicMatterRaw.max(0);
+
+// REVERTING ORGANIC MATTER NUMBERS FROM LOG BASE 10 TO ORIGINAL PERCENTAGE
+var organicMatter = organicMatterRaw.expression(
+  "10 ** OM",
+  {
+    'OM': organicMatterRaw
+    }
+);
 var hydraulicCond = ee.ImageCollection('projects/sat-io/open-datasets/polaris/ksat_mean')
     .first()
     .clip(geometry);    
@@ -471,7 +479,7 @@ function queueExport3(image, description, region) {
 }
 
 // Queue up the export task for 0.5m data
-queueExport3(SlopeData, 'Slope_Data_export');
+queueExport3(SlopeData, 'LiDAR_Data_export');
 
 //Vector Export:
 // Export stratified sample points as a SHP
