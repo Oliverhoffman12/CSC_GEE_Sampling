@@ -64,13 +64,19 @@ var organicMatterRaw = ee.ImageCollection('projects/sat-io/open-datasets/polaris
 // Altering Organic Matter numbers < 0 to 0
 //var organicMatter = organicMatterRaw.max(0);
 
-// REVERTING ORGANIC MATTER NUMBERS FROM LOG BASE 10 TO ORIGINAL PERCENTAGE
+// REVERTING ORGANIC MATTER NUMBERS FROM LOG BASE 10 TO ORIGINAL PERCENTAGE (Check here for outliers and apply max and min threshold if needed)
 var organicMatter = organicMatterRaw.expression(
   "10 ** OM",
   {
     'OM': organicMatterRaw
     }
 );
+
+// Setting Cap on Organic Matter values if necessary
+//var minOM = 0;
+//var maxOM = 3;
+//var organicMatter = organicMatterRev.clamp(minOM, maxOM);
+
 var hydraulicCond = ee.ImageCollection('projects/sat-io/open-datasets/polaris/ksat_mean')
     .first()
     .clip(geometry);    
@@ -383,15 +389,15 @@ Map.addLayer(coloredClusters, {}, 'Clusters');
 Map.addLayer(proportionalStratifiedSample, {color: 'FF0000'}, 'Proportional Stratified Sample Points');
 
 // NDVI layer
-var ndviLayer = ui.Map.Layer(ndvi, {min: 0, max: 0.5, palette: ['ff0000', 'ff8000', 'ffff00', '80ff00', '00ff00']}, 'NDVI', false);
+var ndviLayer = ui.Map.Layer(ndvi, {min: -1, max: 1, palette: ['ff0000', 'ff8000', 'ffff00', '80ff00', '00ff00']}, 'NDVI', false);
 Map.layers().add(ndviLayer);
 
 // NDWI layer
-var ndwiLayer = ui.Map.Layer(ndwi, {min: -0.5, max: 0, palette: ['8c510a', 'bf812d', 'dfc27d', 'f6e8c3', 'c7eae5', '80cdc1', '35978f', '01665e']}, 'NDWI', false);
+var ndwiLayer = ui.Map.Layer(ndwi, {min: -1, max: 1, palette: ['8c510a', 'bf812d', 'dfc27d', 'f6e8c3', 'c7eae5', '80cdc1', '35978f', '01665e']}, 'NDWI', false);
 Map.layers().add(ndwiLayer);
 
 // Organic Matter 
-var OMLayer = ui.Map.Layer(organicMatter_resampled, {min: -0.05, max: 0.88, palette: ['#fefee2', '#a6761d']}, 'Organic Matter', false);
+var OMLayer = ui.Map.Layer(organicMatter_resampled, {min: 0, max: 10, palette: ['#fefee2', '#a6761d']}, 'Organic Matter', false);
 Map.layers().add(OMLayer);
 
 // Bulk Density 
