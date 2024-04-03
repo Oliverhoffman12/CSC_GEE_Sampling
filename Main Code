@@ -1,7 +1,3 @@
-// Data Driven Soil Sampling Using Google Earth Engine and ESRI 
-// Oliver Hoffman 
-// 04-02-2024
-
 // STEP 1- ALTERATION OF DYNAMIC VALUES:
 // How many clusters do you want?
 var numClusters = 5; 
@@ -10,10 +6,10 @@ var numClusters = 5;
 var numPoints = 30;            
 
 // What is the name of the polygon you made?
-var geometry = LeFrance;
+var geometry = ________;
 
-// LiDAR data brought in from ArcGIS Pro as a TIF file (accessed via assets)
-var SlopeData = ee.Image('projects/earthengine-legacy/assets/users/oliverhoffmand/lidarslopelefrance').clip(geometry);
+// Slope data brought in from ArcGIS Pro as a TIFF file (accessed via assets)
+var SlopeData = ee.Image('projects/earthengine-legacy/assets/users/yourgmailwithout@gmail.com____/filename_______').clip(geometry);
 
 // Define date ranges for Sentinel-2 image collection
 var dateRanges = [
@@ -197,7 +193,7 @@ var result = stackedImage.cluster(clusterer);
 //------------------------------------------------------------------------------------------------
 
 // STEP 5- DETERMINE FEATURE IMPORTANCE USING RANDOM FOREST:
-// Label data
+// Label your data with cluster assignments
 var labeledPixels = stackedImage.addBands(result.select('cluster').rename('label'));
 
 // Sample the labeled pixels to prepare for Random Forest training
@@ -208,7 +204,7 @@ var trainingSample = labeledPixels.sample({
   seed: 0
 });
 
-// Train Random Forest classifier with the cluster labels
+// Train a Random Forest classifier with the cluster labels
 var classifier = ee.Classifier.smileRandomForest(50) 
     .train({
       features: trainingSample,
@@ -216,9 +212,10 @@ var classifier = ee.Classifier.smileRandomForest(50)
       inputProperties: stackedImage.bandNames()
     });
 
+// Retrieve and print feature importance
 var featureImportance = ee.Dictionary(classifier.explain().get('importance'));
 
-// Print the feature importance
+// Evaluate and print the feature importance to understand the impact on clustering
 featureImportance.evaluate(function(importance) {
   print('Feature Importance:', importance);
 });
@@ -288,7 +285,7 @@ var clusterVector = result.reduceToVectors({
   labelProperty: 'cluster'
 });
 
-// Color to assign for each cluster
+// Generates random color to assign for each cluster
 function getRandomColor() {
   var letters = '0123456789ABCDEF';
   var color = '#';
@@ -474,7 +471,7 @@ function queueExport3(image, description, region) {
 }
 
 // Queue up the export task for 0.5m data
-queueExport3(SlopeData, 'LiDAR_Data_export');
+queueExport3(SlopeData, 'Slope_Data_export');
 
 //Vector Export:
 // Export stratified sample points as a SHP
